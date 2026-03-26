@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "75630856613",
+    "firebase_url": "https://waos-4535f-default-rtdb.firebaseio.com",
+    "project_id": "waos-4535f",
+    "storage_bucket": "waos-4535f.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:75630856613:android:a36ad5c1a62d3e8f22c04c",
+        "android_client_info": {
+          "package_name": "com.example.proyxd"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAV-DPmLiwfYS4zajpXWHJs1isahcsh9t8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

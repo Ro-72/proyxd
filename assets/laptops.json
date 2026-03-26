@@ -1,0 +1,44 @@
+{
+  "laptops": {
+    "03EE82A5": {
+      "nombre": "Dell Latitude 5420",
+      "laboratorio": "Laboratorio A - Ingeniería"
+    },
+    "73462E10": {
+      "nombre": "HP EliteBook 840",
+      "laboratorio": "Laboratorio B - Sistemas"
+    },
+    "LAP003": {
+      "nombre": "Lenovo ThinkPad T14",
+      "laboratorio": "Laboratorio A - Ingeniería"
+    },
+    "LAP004": {
+      "nombre": "ASUS VivoBook Pro",
+      "laboratorio": "Laboratorio C - Multimedia"
+    },
+    "LAP005": {
+      "nombre": "Acer Aspire 5",
+      "laboratorio": "Laboratorio B - Sistemas"
+    },
+    "LAP006": {
+      "nombre": "MacBook Pro 13",
+      "laboratorio": "Laboratorio C - Multimedia"
+    },
+    "LAP007": {
+      "nombre": "Dell XPS 13",
+      "laboratorio": "Laboratorio A - Ingeniería"
+    },
+    "LAP008": {
+      "nombre": "HP Pavilion 15",
+      "laboratorio": "Laboratorio D - Diseño"
+    },
+    "LAP009": {
+      "nombre": "Lenovo IdeaPad Gaming",
+      "laboratorio": "Laboratorio C - Multimedia"
+    },
+    "LAP010": {
+      "nombre": "MSI Modern 14",
+      "laboratorio": "Laboratorio B - Sistemas"
+    }
+  }
+}
