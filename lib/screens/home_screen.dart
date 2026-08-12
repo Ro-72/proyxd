@@ -1,9 +1,45 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'laptop_records_screen.dart';
+import 'camera_screen.dart';
+import 'camera_settings_screen.dart';
+import '../services/activation_service.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  final ActivationService _activationService = ActivationService();
+
+  @override
+  void initState() {
+    super.initState();
+    _startMonitoring();
+  }
+
+  void _startMonitoring() {
+    _activationService.startMonitoring();
+    _activationService.activationStream.listen((record) {
+      if (record.status == 'Activo' && mounted) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => CameraScreen(initialRecord: record),
+          ),
+        );
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _activationService.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -84,6 +120,43 @@ class HomeScreen extends StatelessWidget {
                   borderRadius: BorderRadius.circular(12),
                 ),
               ),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const CameraScreen(),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.videocam),
+              label: const Text('Ver Cámara'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red[700],
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 32,
+                  vertical: 16,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            TextButton.icon(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const CameraSettingsScreen(),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.settings),
+              label: const Text('Configurar Cámara'),
             ),
           ],
         ),
