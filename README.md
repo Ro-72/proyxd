@@ -1,5 +1,7 @@
 # PROYXD - Sistema de Control de Laptops
 
+# El codigo del ESP32 se encuentra en el archivo CodigoESP32.txt
+
 ## Descripción
 
 Aplicación móvil desarrollada en Flutter para gestionar el control de préstamo de laptops en laboratorios universitarios. Permite visualizar registros de salida de laptops con filtro por fecha.
