@@ -1,0 +1,442 @@
+// ===== LIBRERÍAS =====
+#include <WiFi.h>       // Conexión WiFi del ESP32
+#include <HTTPClient.h> // Cliente HTTP para enviar datos a Firebase
+#include <SPI.h>        // Bus SPI, usado por el lector RC522
+#include <MFRC522.h>    // Librería para el lector RFID RC522
+#include <time.h>       // Manejo de fecha/hora (NTP)
+
+// ===== CREDENCIALES WIFI =====
+#define WIFI_SSID "Waos"
+#define WIFI_PASSWORD "amogos123"
+
+// ===== PINES DEL LECTOR RC522 (SPI) =====
+#define SS_PIN 5   // Pin Slave Select (SDA) del RC522
+#define RST_PIN 4  // Pin de Reset del RC522
+MFRC522 mfrc522(SS_PIN, RST_PIN); // Objeto que representa el lector RC522
+
+// ===== PINES DE SALIDA (LEDs y buzzer) =====
+#define ON_Board_LED 2 // LED integrado de la placa (indicador de estado general)
+#define LedRojo 0      // LED rojo: indica acceso denegado
+#define LedVerde 4     // LED verde: indica acceso concedido
+#define BUZZER_PIN 16  // Buzzer para retroalimentación sonora
+
+// ===== CONFIGURACIÓN DE FIREBASE =====
+const String FIREBASE_HOST = "-"; // URL de la base de datos
+const String FIREBASE_AUTH = "-"; // Token de autenticación
+
+// ===== CONFIGURACIÓN DE HORA (NTP) =====
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = -18000;   // Offset de zona horaria en segundos (-5 horas)
+const int daylightOffset_sec = 0;    // Sin horario de verano
+
+// ===== PINES DEL LECTOR WIEGAND =====
+#define WIEGAND_D0 12   // Línea de datos D0 del lector Wiegand
+#define WIEGAND_D1 14   // Línea de datos D1 del lector Wiegand
+#define WIEGAND_INT 35  // Pin reservado (no se usa actualmente en el código)
+
+// Variables compartidas entre las interrupciones y el loop principal.
+// 'volatile' porque se modifican dentro de rutinas de interrupción (ISR).
+volatile unsigned long wiegandBits = 0;   // Acumula los bits recibidos del lector Wiegand
+volatile int bitCount = 0;                // Cuenta cuántos bits se han recibido
+volatile unsigned long lastPulseTime = 0; // Marca de tiempo del último pulso recibido
+
+const int WIEGAND_BITS = 26;               // Formato Wiegand esperado: 26 bits
+const unsigned long BIT_TIMEOUT_US = 5000; // Tiempo sin pulsos para considerar que la trama terminó
+const unsigned long MIN_BIT_GAP_US = 800;  // Tiempo mínimo entre pulsos para filtrar ruido/rebotes
+
+// ===== INTERRUPCIÓN: pulso recibido en línea D0 (representa un bit "0") =====
+void IRAM_ATTR wiegandD0() {
+  unsigned long now = micros();
+  unsigned long gap = now - lastPulseTime;
+
+  // Filtra pulsos demasiado seguidos (posible ruido eléctrico)
+  if (gap > MIN_BIT_GAP_US) {
+    if (bitCount < 32) {
+      wiegandBits <<= 1;   // Desplaza el registro de bits e inserta un 0
+      bitCount++;
+      lastPulseTime = now;
+    }
+  }
+}
+
+// ===== INTERRUPCIÓN: pulso recibido en línea D1 (representa un bit "1") =====
+void IRAM_ATTR wiegandD1() {
+  unsigned long now = micros();
+  unsigned long gap = now - lastPulseTime;
+
+  if (gap > MIN_BIT_GAP_US) {
+    if (bitCount < 32) {
+      wiegandBits <<= 1;
+      wiegandBits |= 1;    // Desplaza e inserta un 1
+      bitCount++;
+      lastPulseTime = now;
+    }
+  }
+}
+
+// ===== VARIABLES GLOBALES DE LECTURA DE TARJETAS =====
+int readsuccess;          // Bandera de éxito de lectura (RC522)
+byte readcard[4];         // Bytes crudos del UID leído por el RC522
+char str[32] = "";        // Buffer para el UID convertido a texto hexadecimal
+String StrUID;            // UID final en formato String (RC522 o Wiegand)
+String StrFC = "";        // Facility Code (solo Wiegand)
+String StrCN = "";        // Card Number (solo Wiegand)
+String lastSentUID = "";  // Último UID enviado, para evitar duplicados
+unsigned long lastSendTime = 0; // Momento del último envío
+
+const unsigned long MIN_REPEAT_MS = 5000; // Tiempo mínimo entre envíos repetidos de la misma tarjeta
+
+// ===== FUNCIÓN: genera un tono en el buzzer de forma bloqueante =====
+// pin: pin del buzzer | frequency: frecuencia del tono en Hz | duration: duración en ms
+void beep(uint8_t pin, unsigned int frequency, unsigned long duration) {
+  if (frequency == 0) {
+    digitalWrite(pin, LOW); // Frecuencia 0 = silencio
+    return;
+  }
+
+  unsigned long period = 1000000L / frequency; // Periodo de la onda en microsegundos
+  unsigned long halfPeriod = period / 2;       // Medio periodo (tiempo en HIGH y en LOW)
+
+  unsigned long startTime = millis();
+
+  // Genera la onda cuadrada manualmente durante "duration" milisegundos
+  while (millis() - startTime < duration) {
+    digitalWrite(pin, HIGH);
+    delayMicroseconds(halfPeriod);
+    digitalWrite(pin, LOW);
+    delayMicroseconds(halfPeriod);
+  }
+}
+
+// ===== CONFIGURACIÓN INICIAL (se ejecuta una sola vez al encender) =====
+void setup() {
+  Serial.begin(115200); // Inicia el puerto serie para depuración
+
+  // Configura pines de salida (LEDs y buzzer)
+  pinMode(ON_Board_LED, OUTPUT);
+  pinMode(LedRojo, OUTPUT);
+  pinMode(LedVerde, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  // Estado inicial de los pines
+  digitalWrite(ON_Board_LED, HIGH);
+  digitalWrite(LedRojo, LOW);
+  digitalWrite(LedVerde, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  // Inicializa el bus SPI y el lector RC522
+  SPI.begin();
+  mfrc522.PCD_Init();
+
+  Serial.println("RFID Reader Initialized");
+
+  // Configura los pines del lector Wiegand como entradas con pull-up
+  // y asocia cada uno a su función de interrupción (se dispara en flanco de bajada)
+  pinMode(WIEGAND_D0, INPUT_PULLUP);
+  pinMode(WIEGAND_D1, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(WIEGAND_D0), wiegandD0, FALLING);
+  attachInterrupt(digitalPinToInterrupt(WIEGAND_D1), wiegandD1, FALLING);
+  Serial.println("Wiegand Reader Initialized");
+
+  // Conexión a la red WiFi
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to WiFi");
+
+  // Espera a que se conecte, parpadeando el LED de la placa mientras tanto
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    digitalWrite(ON_Board_LED, LOW);
+    delay(250);
+    digitalWrite(ON_Board_LED, HIGH);
+    delay(250);
+  }
+
+  Serial.println("\nConnected to WiFi!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  // Sincroniza la hora del dispositivo con un servidor NTP
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  Serial.println("Synchronizing time with NTP server...");
+
+  struct tm timeinfo;
+  int retries = 0;
+  // Intenta obtener la hora hasta 10 veces antes de continuar sin ella
+  while (!getLocalTime(&timeinfo) && retries < 10) {
+    Serial.print(".");
+    delay(1000);
+    retries++;
+  }
+
+  if (retries < 10) {
+    Serial.println("\nTime synchronized!");
+    Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
+  } else {
+    Serial.println("\nFailed to sync time, continuing anyway...");
+  }
+
+  startupBeep(); // Secuencia de sonido indicando que el sistema está listo
+
+  Serial.println("Ready to scan RFID cards...");
+}
+
+// ===== BUCLE PRINCIPAL (se ejecuta continuamente) =====
+void loop() {
+  // --- Intenta leer una tarjeta con el lector RC522 (SPI) ---
+  readsuccess = getid();
+
+  if (readsuccess) {
+    digitalWrite(ON_Board_LED, LOW); // Apaga el LED de placa mientras procesa
+
+    Serial.println("------------------------------------");
+    Serial.print("UID MFRC522: ");
+    Serial.println(StrUID);
+
+    beep(BUZZER_PIN, 800, 100); // Beep corto de confirmación de lectura
+    delay(150);
+
+    sendToFirebase(StrUID, "", ""); // Envía el UID a Firebase (sin facility code/card number)
+
+    delay(1000);
+    digitalWrite(ON_Board_LED, HIGH); // Vuelve a encender el LED de placa
+  }
+
+  // --- Intenta leer una tarjeta con el lector Wiegand ---
+  readsuccess = getidWiegand();
+  if (readsuccess) {
+    digitalWrite(ON_Board_LED, LOW);
+
+    Serial.println("------------------------------------");
+    Serial.print("UID Wiegand: ");
+    Serial.println(StrUID);
+
+    beep(BUZZER_PIN, 800, 100);
+    delay(150);
+
+    sendToFirebase(StrUID, StrFC, StrCN); // Envía UID + facility code + card number
+
+    delay(1000);
+    digitalWrite(ON_Board_LED, HIGH);
+  }
+}
+
+// ===== SECUENCIA DE SONIDO AL INICIAR EL DISPOSITIVO =====
+void startupBeep() {
+  beep(BUZZER_PIN, 1000, 100);
+  delay(150);
+  beep(BUZZER_PIN, 1500, 100);
+  delay(150);
+  beep(BUZZER_PIN, 2000, 100);
+}
+
+// ===== SECUENCIA DE SONIDO PARA ACCESO CONCEDIDO =====
+void beepGranted() {
+  beep(BUZZER_PIN, 1000, 200);
+  delay(100);
+  beep(BUZZER_PIN, 1500, 300);
+  delay(100);
+  beep(BUZZER_PIN, 2000, 200);
+}
+
+// ===== SECUENCIA DE SONIDO PARA ACCESO DENEGADO =====
+void beepDenied() {
+  beep(BUZZER_PIN, 300, 500);
+  delay(200);
+  beep(BUZZER_PIN, 250, 500);
+}
+
+// ===== OBTIENE LA HORA ACTUAL FORMATEADA COMO "HH:MM:SS" =====
+String getFormattedTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return "00:00:00"; // Valor por defecto si no se pudo obtener la hora
+  }
+
+  char timeString[9];
+  strftime(timeString, sizeof(timeString), "%H:%M:%S", &timeinfo);
+  return String(timeString);
+}
+
+// ===== OBTIENE LA FECHA ACTUAL FORMATEADA COMO "DD/MM/AAAA" =====
+String getFormattedDate() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return "01/01/2024"; // Valor por defecto si no se pudo obtener la fecha
+  }
+
+  char dateString[11];
+  strftime(dateString, sizeof(dateString), "%d/%m/%Y", &timeinfo);
+  return String(dateString);
+}
+
+// ===== ENVÍA LOS DATOS DE LA TARJETA LEÍDA A FIREBASE =====
+// uid: identificador de la tarjeta | fc: facility code (Wiegand) | cn: card number (Wiegand)
+void sendToFirebase(String uid, String fc, String cn) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+
+    String timestamp = getFormattedTime();
+    String fecha = getFormattedDate();
+
+    // Genera un "ID único" basado en millis() para la ruta del registro en Firebase
+    String uniqueId = String(millis());
+    String path = "/usersTest/" + uniqueId + ".json?auth=" + FIREBASE_AUTH;
+    String url = "https://" + FIREBASE_HOST + path;
+
+    // Construye manualmente el cuerpo JSON con los datos del evento
+    String jsonData = "{";
+    jsonData += "\"uid\":\"" + uid + "\",";
+    jsonData += "\"facilityCode\":\"" + fc + "\",";
+    jsonData += "\"cardNumber\":\"" + cn + "\",";
+    jsonData += "\"timestamp\":\"" + timestamp + "\",";
+    jsonData += "\"fecha\":\"" + fecha + "\",";
+    jsonData += "\"status\":\"scanned\"";
+    jsonData += "}";
+
+    Serial.println("Sending data:");
+    Serial.println(jsonData);
+
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+
+    // PATCH actualiza/crea el nodo en la base de datos con los datos del JSON
+    int httpCode = http.PATCH(jsonData);
+
+    if (httpCode > 0) {
+      if (httpCode == HTTP_CODE_OK) {
+        Serial.println("Data sent to Firebase successfully!");
+        Serial.println("Timestamp: " + timestamp);
+        Serial.println("Fecha: " + fecha);
+        accessGranted(); // Indica acceso concedido si el envío fue exitoso
+      } else {
+        Serial.print("HTTP Error code: ");
+        Serial.println(httpCode);
+        accessDenied(); // Indica acceso denegado si hubo error HTTP
+      }
+    } else {
+      Serial.print("HTTP Error: ");
+      Serial.println(http.errorToString(httpCode).c_str());
+      accessDenied(); // Indica acceso denegado si falló la conexión HTTP
+    }
+
+    http.end(); // Libera los recursos del cliente HTTP
+  } else {
+    Serial.println("WiFi disconnected!");
+    accessDenied(); // Sin WiFi no se puede enviar, se considera acceso denegado
+  }
+}
+
+// ===== INDICA VISUAL Y SONORAMENTE QUE EL ACCESO FUE CONCEDIDO =====
+void accessGranted() {
+  digitalWrite(LedVerde, HIGH);
+  Serial.println("ACCESS GRANTED");
+  beepGranted();
+  delay(3000);
+  digitalWrite(LedVerde, LOW);
+}
+
+// ===== INDICA VISUAL Y SONORAMENTE QUE EL ACCESO FUE DENEGADO =====
+void accessDenied() {
+  digitalWrite(LedRojo, HIGH);
+  Serial.println("ACCESS DENIED");
+  beepDenied();
+  delay(3000);
+  digitalWrite(LedRojo, LOW);
+}
+
+// ===== LEE UNA TARJETA CON EL LECTOR RC522 (SPI) =====
+// Devuelve 1 si se leyó una tarjeta nueva, 0 si no hay tarjeta o falló la lectura
+int getid() {
+  if (!mfrc522.PICC_IsNewCardPresent()) return 0; // No hay tarjeta cerca
+  if (!mfrc522.PICC_ReadCardSerial()) return 0;   // Error al leer el serial de la tarjeta
+
+  // Convierte los 4 bytes del UID a una cadena hexadecimal
+  for (int i = 0; i < 4; i++) {
+    readcard[i] = mfrc522.uid.uidByte[i];
+    array_to_string(readcard, 4, str);
+    StrUID = str;
+  }
+  mfrc522.PICC_HaltA(); // Detiene la comunicación con la tarjeta
+  return 1;
+}
+
+// ===== PROCESA LOS BITS RECIBIDOS POR EL LECTOR WIEGAND =====
+// Devuelve 1 si se completó y decodificó una trama válida, 0 en caso contrario
+int getidWiegand() {
+  unsigned long now = millis();
+  unsigned long gap = micros() - lastPulseTime; // Tiempo transcurrido desde el último pulso
+
+  // Si ya se recibieron los 26 bits esperados y pasó suficiente tiempo sin nuevos pulsos,
+  // se considera que la trama terminó de recibirse
+  if (bitCount >= WIEGAND_BITS && gap > BIT_TIMEOUT_US) {
+    // Extrae el Facility Code (8 bits) y el Card Number (16 bits) del registro de bits
+    unsigned long facilityCode = (wiegandBits >> 16) & 0xFF;
+    unsigned long cardNumber = wiegandBits & 0xFFFF;
+
+    // Si ambos valores son 0, probablemente es ruido/trama inválida: se descarta
+    if (facilityCode == 0 && cardNumber == 0) {
+      wiegandBits = 0;
+      bitCount = 0;
+      return 0;
+    }
+
+    // Arma el UID combinado en texto (ej: "FC:0A CN:1B2C")
+    char buffer[20];
+    snprintf(buffer, sizeof(buffer), "FC:%02X CN:%04X", (unsigned int)facilityCode, (unsigned int)cardNumber);
+    StrUID = buffer;
+
+    // Guarda por separado el Facility Code en texto
+    char fcStr[5];
+    snprintf(fcStr, sizeof(fcStr), "%02X", (unsigned int)facilityCode);
+    StrFC = fcStr;
+
+    // Guarda por separado el Card Number en texto
+    char cnStr[6];
+    snprintf(cnStr, sizeof(cnStr), "%04X", (unsigned int)cardNumber);
+    StrCN = cnStr;
+
+    // Evita reenviar la misma tarjeta si se leyó hace menos de 5 segundos
+    if (StrUID == lastSentUID && (now - lastSendTime) < 5000) {
+      wiegandBits = 0;
+      bitCount = 0;
+      return 0;
+    }
+
+    // Reinicia el registro de bits para la próxima lectura
+    wiegandBits = 0;
+    bitCount = 0;
+
+    // Actualiza el registro de la última tarjeta enviada y su momento de envío
+    lastSentUID = StrUID;
+    lastSendTime = now;
+
+    Serial.print("Facility Code: ");
+    Serial.print(facilityCode, HEX);
+    Serial.print(" | Card Number: ");
+    Serial.println(cardNumber, HEX);
+
+    return 1; // Trama válida decodificada con éxito
+  }
+
+  // Si se recibieron más bits de los esperados, o quedó una trama incompleta
+  // durante demasiado tiempo (100 ms), se descarta y se reinicia el conteo
+  if (bitCount > WIEGAND_BITS || (bitCount > 0 && gap > 100000)) {
+    wiegandBits = 0;
+    bitCount = 0;
+  }
+
+  return 0; // Aún no hay una trama completa lista
+}
+
+// ===== CONVIERTE UN ARREGLO DE BYTES A UNA CADENA HEXADECIMAL =====
+// array: bytes de entrada (ej. UID) | len: cantidad de bytes | buffer: cadena de salida
+void array_to_string(byte array[], unsigned int len, char buffer[]) {
+  for (unsigned int i = 0; i < len; i++) {
+    byte nib1 = (array[i] >> 4) & 0x0F; // Nibble alto del byte
+    byte nib2 = (array[i] >> 0) & 0x0F; // Nibble bajo del byte
+    // Convierte cada nibble a su carácter hexadecimal correspondiente
+    buffer[i * 2 + 0] = nib1 < 0xA ? '0' + nib1 : 'A' + nib1 - 0xA;
+    buffer[i * 2 + 1] = nib2 < 0xA ? '0' + nib2 : 'A' + nib2 - 0xA;
+  }
+  buffer[len * 2] = '\0'; // Termina la cadena con el carácter nulo
+}
